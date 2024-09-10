@@ -1,0 +1,10 @@
+
+torch
+transformers>=4.38.0
+Pillow
+numpy
+diffusers
+openai
+torchvision
+colorama
+flash-attn
