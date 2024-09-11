@@ -33,6 +33,7 @@ To our knowledge, no other tool combines these capabilities, making FLUX Capacit
 - Python 3.8 or higher
 - A CUDA-capable GPU (recommended for fast processing)
 - OpenAI API key (optional, for GPT-4 prompt generation)
+- 48 GB VRAM
 
 ### Setup
 
