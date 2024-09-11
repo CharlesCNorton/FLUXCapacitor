@@ -90,7 +90,7 @@ class FluxCapacitor:
                     {"role": "system", "content": "You are a creative assistant generating image prompts."},
                     {"role": "user", "content": prompt_content}
                 ],
-                max_tokens=74,
+                max_tokens=73,
                 temperature=0.9,
                 n=1,
             )
@@ -179,7 +179,7 @@ class FluxCapacitor:
             with open(txt_path, 'w') as f:
                 for bbox, label in zip(results['<OD>']['bboxes'], results['<OD>']['labels']):
                     if label.lower() in [cls.lower() for cls in self.detection_class]:
-                        class_id = 0
+                        class_id = self.detection_class.index(label.lower())
                         x1, y1, x2, y2 = bbox
                         img_width, img_height = image_size
                         x_center = (x1 + x2) / 2 / img_width
@@ -192,19 +192,13 @@ class FluxCapacitor:
         except Exception as e:
             print(f"{Fore.RED}Error saving YOLO annotations: {e}")
 
-    def draw_and_save_bbox(self, image_path, results):
-        """Draw bounding boxes on the image (optional)."""
-        print(f"{Fore.CYAN}Processing bounding boxes for: {image_path} (not drawing on the image)")
+    def remove_invalid_image(self, image_path):
+        """Remove the image file that doesn't meet the detection criteria."""
         try:
-            img = Image.open(image_path)
-
-            for bbox, label in zip(results['<OD>']['bboxes'], results['<OD>']['labels']):
-                if label.lower() in [cls.lower() for cls in self.detection_class]:
-                    x1, y1, x2, y2 = bbox
-                    print(f"{Fore.YELLOW}Detected bounding box: {x1}, {y1}, {x2}, {y2}, label: {label}")
-
-        except Exception as e:
-            print(f"{Fore.RED}Error processing bounding boxes: {e}")
+            os.remove(image_path)
+            print(f"{Fore.YELLOW}Removed image without target classes: {image_path}")
+        except OSError as e:
+            print(f"{Fore.RED}Error removing invalid image {image_path}: {e}")
 
     def apply_augmentations(self, image):
         """Apply augmentations to the image."""
@@ -248,12 +242,18 @@ class FluxCapacitor:
 
             if results is None:
                 print(f"{Fore.YELLOW}No detections found for {image_path}")
+                self.remove_invalid_image(image_path)
+                return None
+
+            detected_labels = results.get('<OD>', {}).get('labels', [])
+            if not any(label.lower() in [cls.lower() for cls in self.detection_class] for label in detected_labels):
+                print(f"{Fore.YELLOW}Removing image with no target class '{self.target_class}': {image_path}")
+                self.remove_invalid_image(image_path)
                 return None
 
             original_image_path = os.path.join(output_dir, os.path.basename(image_path))
             img.save(original_image_path)
             self.save_yolo_annotations(original_image_path, results, img.size)
-            self.draw_and_save_bbox(original_image_path, results)
 
             image_paths = [original_image_path]
 
@@ -265,9 +265,10 @@ class FluxCapacitor:
                 augmented_results = self.run_object_detection(augmented_img)
                 if augmented_results is not None:
                     self.save_yolo_annotations(augmented_img_path, augmented_results, augmented_img.size)
-                    self.draw_and_save_bbox(augmented_img_path, augmented_results)
                 else:
                     print(f"{Fore.YELLOW}No detections found for augmented image {augmented_img_path}")
+                    self.remove_invalid_image(augmented_img_path)
+                    continue
 
                 image_paths.append(augmented_img_path)
 
@@ -279,33 +280,32 @@ class FluxCapacitor:
             return None
 
     def generate_background_images(self, prompt_history, num_batches, num_seeds):
-        """Generate unique background images for each dataset split."""
+        """Generate unique background images and distribute them across dataset splits."""
         if not self.enable_background_generation:
-            return []
+            return
 
-        generated_images = []
         dataset_splits = ['train', 'val', 'eval']
-
         for split in dataset_splits:
             split_dir = os.path.join(self.dataset_dir, 'images', split)
             label_dir = os.path.join(self.dataset_dir, 'labels', split)
             os.makedirs(split_dir, exist_ok=True)
             os.makedirs(label_dir, exist_ok=True)
 
-            for batch in range(num_batches):
-                for seed in range(num_seeds):
+            for batch_index in range(num_batches):
+                for seed_index in range(num_seeds):
                     prompt = self.generate_prompt('background', prompt_history, exclude_objects=True)
                     if prompt:
+                        seed = random.randint(0, 10000)
                         background_image = self.pipeline(
                             prompt,
                             height=RESOLUTION[0],
                             width=RESOLUTION[1],
                             guidance_scale=3.5,
                             num_inference_steps=NUM_INFERENCE_STEPS,
-                            generator=torch.Generator(self.device).manual_seed(random.randint(0, 10000))
+                            generator=torch.Generator(self.device).manual_seed(seed)
                         ).images[0]
 
-                        img_filename = f"{split}_bg_{batch+1}_seed{seed+1}.png"
+                        img_filename = f"{split}_bg_{batch_index+1}_{seed_index+1}.png"
                         img_path = os.path.join(split_dir, img_filename)
                         background_image.save(img_path)
 
@@ -313,21 +313,18 @@ class FluxCapacitor:
                         annotation_path = os.path.join(label_dir, annotation_filename)
                         self.create_empty_annotation(annotation_path)
 
-                        generated_images.append(img_path)
                         print(f"{Fore.GREEN}Background image saved: {img_path}")
                     else:
                         print(f"{Fore.RED}Failed to generate a valid prompt for background.")
-        return generated_images
 
-    def create_empty_annotation(self, image_path):
+    def create_empty_annotation(self, annotation_path):
         """Create an empty annotation file."""
-        annotation_path = image_path.replace('.png', '.txt')
         try:
             with open(annotation_path, 'w') as f:
                 pass
             print(f"{Fore.GREEN}Empty annotation file created: {annotation_path}")
         except Exception as e:
-            print(f"{Fore.RED}Error creating empty annotation file for {image_path}: {e}")
+            print(f"{Fore.RED}Error creating empty annotation file for {annotation_path}: {e}")
 
     def move_files(self, paths, image_dir, label_dir):
         """Move image and annotation files to their respective directories."""
@@ -346,9 +343,9 @@ class FluxCapacitor:
                 print(f"{Fore.YELLOW}Skipping image {image_filename} due to missing or empty label.")
 
     def split_dataset(self, image_paths):
-        """Split the dataset into train, validation, and test sets."""
+        """Split the dataset into train, validation, and eval sets."""
         try:
-            print(f"{Fore.CYAN}Splitting dataset into train, validation, and test sets...")
+            print(f"{Fore.CYAN}Splitting dataset into train, validation, and eval sets...")
 
             train_images_dir, val_images_dir, eval_images_dir, train_labels_dir, val_labels_dir, eval_labels_dir = self.create_dataset_directories()
 
@@ -370,7 +367,7 @@ class FluxCapacitor:
                 val_paths = random.sample(remaining, val_size)
                 eval_paths = [path for path in remaining if path not in val_paths]
 
-                print(f"{Fore.GREEN}Total images: {total_images}. Train: {len(selected_train_paths)}, Val: {len(val_paths)}, Test: {len(eval_paths)}")
+                print(f"{Fore.GREEN}Total images: {total_images}. Train: {len(selected_train_paths)}, Val: {len(val_paths)}, Eval: {len(eval_paths)}")
                 return selected_train_paths, val_paths, eval_paths
 
             train_paths, val_paths, eval_paths = split_class(image_paths)
@@ -416,7 +413,7 @@ class FluxCapacitor:
                 "path: " + self.dataset_dir.replace("\\", "/") + "  # Base dataset directory\n"
                 "train: images/train  # Train images directory\n"
                 "val: images/val  # Validation images directory\n"
-                "test: images/test  # Test images directory\n"
+                "eval: images/eval  # Eval images directory\n"
                 "nc: " + str(len(self.detection_class)) + "  # Number of classes\n"
                 "names: " + str(self.detection_class) + "  # Class names\n"
             )
@@ -481,7 +478,6 @@ def main():
     num_seeds = 1
 
     while True:
-        # Determine status colors
         flux_status = f"{Fore.GREEN}Set" if flux_model_dir else f"{Fore.RED}Not Set"
         florence_status = f"{Fore.GREEN}Set" if florence_model_dir else f"{Fore.RED}Not Set"
         api_status = f"{Fore.GREEN}Set" if openai_api_key else f"{Fore.RED}Not Set"
@@ -489,22 +485,18 @@ def main():
         theme_status = f"{Fore.GREEN}Set" if theme else f"{Fore.RED}Not Set"
         classes_status = f"{Fore.GREEN}Set" if detection_classes else f"{Fore.RED}Not Set"
 
-        # Header
         print(f"\n{Fore.BLUE}{Style.BRIGHT}{'='*40}")
         print(f"{Fore.CYAN}{Style.BRIGHT}--- FLUX Capacitor Menu ---{Style.RESET_ALL}")
         print(f"{Fore.BLUE}{'='*40}{Style.RESET_ALL}")
 
-        # Generate Section
         print(f"{Fore.YELLOW}{Style.BRIGHT}\n{'-'*10} Image Generation {'-'*10}{Style.RESET_ALL}")
         print(f"{Fore.CYAN}1. Generate and annotate images")
 
-        # Directory Setup Section
         print(f"{Fore.YELLOW}{Style.BRIGHT}\n{'-'*10} Directory Setup {'-'*10}{Style.RESET_ALL}")
         print(f"{Fore.CYAN}2. Set output directory [{output_status}]")
         print(f"{Fore.CYAN}3. Set FLUX model directory [{flux_status}]")
         print(f"{Fore.CYAN}4. Set Florence model directory [{florence_status}]")
 
-        # API and Options Section
         print(f"{Fore.YELLOW}{Style.BRIGHT}\n{'-'*10} API and Options {'-'*10}{Style.RESET_ALL}")
         print(f"{Fore.CYAN}5. Set OpenAI API key [{api_status}]")
         print(f"{Fore.CYAN}6. Set generation theme [{theme_status}]")
@@ -513,7 +505,6 @@ def main():
         print(f"{Fore.CYAN}9. Set number of seeds per prompt (current: {num_seeds})")
         print(f"{Fore.CYAN}10. Toggle background image generation (current: {'ON' if flux_capacitor.enable_background_generation else 'OFF'})")
 
-        # Exit Section
         print(f"{Fore.YELLOW}{Style.BRIGHT}\n{'-'*10} Exit {'-'*10}{Style.RESET_ALL}")
         print(f"{Fore.CYAN}11. Exit")
 
@@ -529,6 +520,7 @@ def main():
 
             print(f"{Fore.GREEN}Starting image generation process...")
             prompt_history = set()
+
             for batch in range(num_batches):
                 prompt = flux_capacitor.generate_prompt(theme, prompt_history)
                 if prompt:
@@ -543,7 +535,7 @@ def main():
                     print(f"{Fore.RED}Failed to generate prompt.")
 
             if flux_capacitor.enable_background_generation:
-                flux_capacitor.generate_background_images(prompt_history, num_batches, num_seeds, output_dir)
+                flux_capacitor.generate_background_images(prompt_history, num_batches, num_seeds)
 
             flux_capacitor.generate_yaml()
             print(f"{Fore.GREEN}Successfully generated and annotated images.\n")
@@ -552,7 +544,7 @@ def main():
             selected_dir = select_folder("Select Output Directory")
             if selected_dir:
                 output_dir = selected_dir
-                flux_capacitor.dataset_dir = output_dir
+                flux_capacitor.dataset_dir = output_dir  # Ensure dataset_dir is set here
                 print(f"{Fore.GREEN}Output directory set to: {output_dir}")
 
         elif choice == "3":
